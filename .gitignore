@@ -1,0 +1,31 @@
+# Build artifacts
+elyms.exe
+dist/
+build/
+*.msi
+*.exe
+
+# Installer output and local packaging work
+installer/output/
+installer/*.exe
+
+# Documentation and internal planning are intentionally not public
+/docs/*
+
+# Go tooling
+*.test
+coverage.out
+vendor/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
