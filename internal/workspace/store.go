@@ -110,13 +110,12 @@ func Load(path string, aliases []string) (*Store, error) {
 	return s, nil
 }
 
-// ValidateName accepts a trimmed non-empty label without control characters.
+// ValidateName accepts a non-empty label without control characters; the name
+// is trimmed before it is validated and stored.
 func ValidateName(name string) error {
-	if strings.TrimSpace(name) == "" {
+	name = strings.TrimSpace(name)
+	if name == "" {
 		return errors.New("workspace name is required")
-	}
-	if name != strings.TrimSpace(name) {
-		return errors.New("workspace name must not start or end with spaces")
 	}
 	for _, r := range name {
 		if unicode.IsControl(r) {
@@ -175,6 +174,7 @@ func (s *Store) canonical(name string) string {
 
 // Create adds a new workspace and returns its canonical name.
 func (s *Store) Create(name string) (string, error) {
+	name = strings.TrimSpace(name)
 	if err := ValidateName(name); err != nil {
 		return "", err
 	}
@@ -192,6 +192,7 @@ func (s *Store) Rename(oldName, newName string) error {
 	if i < 0 {
 		return ErrNotFound
 	}
+	newName = strings.TrimSpace(newName)
 	if err := ValidateName(newName); err != nil {
 		return err
 	}

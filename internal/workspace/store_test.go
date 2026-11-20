@@ -85,7 +85,7 @@ func TestSaveThenLoadRoundTripsOrderAndAssignments(t *testing.T) {
 
 func TestInvalidWorkspaceNamesAreRejected(t *testing.T) {
 	s, _ := newStore(t)
-	bad := []string{"", "   ", " padded", "padded ", "tab\there", "line\nbreak", "\x00null", "bell\x07"}
+	bad := []string{"", "   ", "tab\there", "line\nbreak", "\x00null", "bell\x07"}
 	for _, name := range bad {
 		if _, err := s.Create(name); err == nil {
 			t.Errorf("Create(%q) should fail", name)
