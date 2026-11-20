@@ -600,11 +600,14 @@ func (m Model) viewMain() string {
 
 	list := m.list
 	left := styles.Panel(true).Width(leftW - 2).Height(listH).Render(list.View(leftW-4, listH))
-	right := styles.Panel(false).Width(rightW - 2).Height(listH).Render(
-		views.Inspector(m.list.Selected(), rightW-4, listH))
+	right := views.Welcome(rightW-4, listH)
+	if h := m.list.Selected(); h != nil {
+		right = views.Inspector(h, rightW-4, listH)
+	}
+	rightPanel := styles.Panel(false).Width(rightW - 2).Height(listH).Render(right)
 
 	title := styles.Title.Render("elyms") + styles.Subtle.Render("  ssh manager")
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, rightPanel)
 	return strings.Join([]string{title, body, m.statusLine(), m.hintLine()}, "\n")
 }
 
@@ -619,14 +622,24 @@ func (m Model) statusLine() string {
 	return st.Render(ansi.Truncate(m.status, m.width, "…"))
 }
 
+// hintLine shows the keys that work right now. It is truncated to the
+// terminal width, so the least essential hint goes last and drops first;
+// truncation is ANSI-aware because the hints are styled.
 func (m Model) hintLine() string {
 	var parts []string
 	if m.list.Filtering() {
 		parts = []string{styles.Hint("enter", "apply"), styles.Hint("esc", "clear")}
+	} else if m.list.Workspace() != "" {
+		parts = []string{
+			styles.Hint("enter", "connect"), styles.Hint("g", "assign"), styles.Hint("w", "all hosts"),
+			styles.Hint("a", "add"), styles.Hint("e", "edit"), styles.Hint("d", "delete"),
+			styles.Hint("k", "keys"), styles.Hint("/", "search"), styles.Hint("q", "quit"),
+		}
 	} else {
 		parts = []string{
-			styles.Hint("enter", "connect"), styles.Hint("a", "add"), styles.Hint("e", "edit"),
-			styles.Hint("d", "delete"), styles.Hint("k", "keys"), styles.Hint("/", "search"), styles.Hint("q", "quit"),
+			styles.Hint("enter", "connect"), styles.Hint("g", "assign"), styles.Hint("w", "workspaces"),
+			styles.Hint("a", "add"), styles.Hint("e", "edit"), styles.Hint("d", "delete"),
+			styles.Hint("k", "keys"), styles.Hint("/", "search"), styles.Hint("q", "quit"),
 		}
 	}
 	return ansi.Truncate(strings.Join(parts, "  "), m.width, "…")

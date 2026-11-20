@@ -131,8 +131,7 @@ func TestStartupShowsHostsInspectorAndHints(t *testing.T) {
 	}
 }
 
-func TestStartupWithNoConfigCreatesItAndShowsEmptyState(t *testing.T) {
-	e, m := newEnv(t, "")
+func TestStartupWithNoConfigCreatesItAndShowsEmptyState(t *testing.T) {	e, m := newEnv(t, "")
 	if !strings.Contains(m.View(), "No hosts") {
 		t.Errorf("empty state missing:\n%s", m.View())
 	}

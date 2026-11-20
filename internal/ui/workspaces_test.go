@@ -557,6 +557,65 @@ func TestStaleAssignmentIsDroppedOnReload(t *testing.T) {
 	}
 }
 
+// TestRightPaneShowsWelcomeWhenNothingIsSelected checks the empty-selection
+// state, and that selecting a host goes back to the inspector.
+func TestRightPaneShowsWelcomeWhenNothingIsSelected(t *testing.T) {
+	_, m := newWSEnv(t, "")
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	v := m.View()
+	for _, want := range []string{"TUI SSH manager", "byntangxyz", "Getting started"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("empty list should show the welcome panel, missing %q:\n%s", want, v)
+		}
+	}
+}
+
+func TestRightPaneShowsInspectorForSelectedHost(t *testing.T) {
+	_, m := newWSEnv(t, cfgSample)
+	v := m.View()
+	if strings.Contains(v, "byntangxyz") {
+		t.Errorf("a selected host should replace the welcome panel:\n%s", v)
+	}
+	if !strings.Contains(v, "Connects with") || !strings.Contains(v, "ssh web") {
+		t.Errorf("inspector missing for the selected host:\n%s", v)
+	}
+}
+
+// TestHintLineAdvertisesWorkspaceControls checks the hint bar names the// workspace keys in the list, and narrows to search hints while filtering.
+func TestHintLineAdvertisesWorkspaceControls(t *testing.T) {
+	_, m := newWSEnv(t, cfgSample)
+	hints := m.hintLine()
+	for _, want := range []string{"workspaces", "assign"} {
+		if !strings.Contains(hints, want) {
+			t.Errorf("hint line missing %q: %q", want, hints)
+		}
+	}
+	if !strings.Contains(hints, "quit") {
+		t.Errorf("brand-new keys must not push out the existing ones: %q", hints)
+	}
+
+	// Inside a workspace context, w leaves it, so the hint says so.
+	m = createWS(m, "Dev")
+	m = key(m, "j")
+	m = key(m, "enter")
+	if hints := m.hintLine(); !strings.Contains(hints, "all hosts") {
+		t.Errorf("a workspace context should advertise leaving it: %q", hints)
+	}
+}
+
+func TestHintLineFilteringShowsOnlySearchHints(t *testing.T) {
+	_, m := newWSEnv(t, cfgSample)
+	m = key(m, "/")
+	hints := m.hintLine()
+	if !strings.Contains(hints, "apply") || !strings.Contains(hints, "clear") {
+		t.Errorf("filtering hints = %q", hints)
+	}
+	if strings.Contains(hints, "workspaces") {
+		t.Errorf("workspace keys cannot run while typing a query: %q", hints)
+	}
+}
+
+
 // TestWorkspaceLifecycleNeverTouchesSSHConfig walks every workspace operation
 // and asserts the SSH config bytes are identical at each step.
 func TestWorkspaceLifecycleNeverTouchesSSHConfig(t *testing.T) {
