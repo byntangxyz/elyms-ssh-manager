@@ -11,6 +11,11 @@ installer/*.exe
 
 # Documentation and internal planning are intentionally not public
 /docs/*
+# Plan/spec files are tracked by negation so they survive this worktree
+!/docs/superpowers/
+!/docs/superpowers/**
+# Superpowers per-plan scratch workspace
+/.superpowers/
 
 # Go tooling
 *.test
