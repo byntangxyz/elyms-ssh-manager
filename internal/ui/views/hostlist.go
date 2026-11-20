@@ -78,7 +78,7 @@ func (l HostList) WorkspaceOf(alias string) string { return l.wsOf[alias] }
 
 func (l *HostList) hasWorkspace(name string) bool {
 	for _, n := range l.wsNames {
-		if n == name {
+		if strings.EqualFold(n, name) {
 			return true
 		}
 	}

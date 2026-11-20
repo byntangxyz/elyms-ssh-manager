@@ -13,7 +13,6 @@ func wsData() WorkspaceData {
 	return WorkspaceData{
 		Names:       []string{"Dev", "Prod"},
 		Assignments: map[string]string{"web": "Dev", "db": "Prod"},
-		Selected:    "web",
 	}
 }
 
@@ -231,7 +230,6 @@ func TestWorkspaceAssignModalOffersUnassignedAndEveryWorkspace(t *testing.T) {
 		Names:       []string{"Dev"},
 		Assignments: map[string]string{"web": "Dev", "db": "Prod"},
 		Target:      "db",
-		Selected:    "db",
 	})
 	if m.Mode() != WorkspaceModeAssign || m.AssignMode() != AssignHost {
 		t.Fatalf("mode = %v assign = %v", m.Mode(), m.AssignMode())

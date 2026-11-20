@@ -34,11 +34,9 @@ type (
 
 // WorkspaceData is everything the modal needs to render itself.
 type WorkspaceData struct {
-	Names             []string          // workspaces in display order
-	Assignments       map[string]string // alias -> workspace
-	Selected          string            // alias of the selected host, if any
-	SelectedIsPattern bool
-	Target            string // when set, the modal opens in assign mode for it
+	Names       []string          // workspaces in display order
+	Assignments map[string]string // alias -> workspace
+	Target      string            // when set, the modal opens in assign mode for it
 }
 
 // WorkspaceMode is which panel of the modal is showing.
@@ -72,13 +70,14 @@ const (
 
 // WorkspaceModal manages workspaces and host assignments.
 type WorkspaceModal struct {
-	data   WorkspaceData
-	mode   WorkspaceMode
-	cursor int
-	offset int
-	input  textinput.Model
-	err    string
-	target string
+	data    WorkspaceData
+	mode    WorkspaceMode
+	cursor  int
+	offset  int
+	input   textinput.Model
+	err     string
+	target  string
+	pending tea.Msg // a typed action decided by the last keystroke
 }
 
 // NewWorkspaceModal opens on the workspace manager, or on the assign chooser
@@ -91,6 +90,26 @@ func NewWorkspaceModal(data WorkspaceData) WorkspaceModal {
 		m.cursor = m.currentAssignChoice()
 	}
 	return m
+}
+
+// TakeAction returns the action the last keystroke decided on, if any. The
+// modal owns key handling, so the action is available synchronously and the
+// root model never has to run the returned command (a text-input cursor-blink
+// timer would stall the update loop).
+func (m *WorkspaceModal) TakeAction() (tea.Msg, bool) {
+	msg := m.pending
+	m.pending = nil
+	if msg == nil {
+		return nil, false
+	}
+	return msg, true
+}
+
+// decide records the action msg as the modal's pending action and returns the
+// matching command, so callers can use the command or TakeAction alike.
+func (m WorkspaceModal) decide(msg tea.Msg) (WorkspaceModal, tea.Cmd) {
+	m.pending = msg
+	return m, func() tea.Msg { return msg }
 }
 
 func wsInput() textinput.Model {
@@ -186,10 +205,15 @@ func (m WorkspaceModal) currentAssignChoice() int {
 func (m WorkspaceModal) managerChoices() int { return len(m.data.Names) + 1 }
 
 func (m WorkspaceModal) Update(msg tea.Msg) (WorkspaceModal, tea.Cmd) {
+	m.pending = nil
 	k, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
 	}
+	return m.handle(k)
+}
+
+func (m WorkspaceModal) handle(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 	switch m.mode {
 	case WorkspaceModeAssign:
 		return m.updateAssign(k)
@@ -206,15 +230,30 @@ func (m WorkspaceModal) setMode(mode WorkspaceMode) WorkspaceModal {
 	return m
 }
 
+func (m WorkspaceModal) clampCursor() WorkspaceModal {
+	last := m.managerChoices() - 1
+	if m.cursor > last {
+		m.cursor = last
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	return m
+}
+
 func (m WorkspaceModal) updateManage(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
+	m = m.clampCursor()
 	switch k.String() {
 	case "esc", "q":
-		return m, func() tea.Msg { return WorkspaceModalCloseMsg{} }
+		return m.decide(WorkspaceModalCloseMsg{})
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
 		}
 	case "down", "j":
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
 		if m.cursor < m.managerChoices()-1 {
 			m.cursor++
 		}
@@ -223,8 +262,16 @@ func (m WorkspaceModal) updateManage(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 	case "end", "G":
 		m.cursor = m.managerChoices() - 1
 	case "enter":
-		name, _ := m.CursorName()
-		return m.setMode(WorkspaceModeManage), func() tea.Msg { return WorkspaceSelectMsg{Name: name} }
+		// All is always a choice; only a cursor left past the end by a
+		// shrunk list has nothing to open.
+		if m.CursorIsAll() {
+			return m.setMode(WorkspaceModeManage).decide(WorkspaceSelectMsg{Name: ""})
+		}
+		name, ok := m.CursorName()
+		if !ok {
+			return m, nil
+		}
+		return m.setMode(WorkspaceModeManage).decide(WorkspaceSelectMsg{Name: name})
 	case "n":
 		return m.openForm(wsCreate, ""), nil
 	case "r":
@@ -234,7 +281,7 @@ func (m WorkspaceModal) updateManage(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 		name, _ := m.CursorName()
 		return m.openForm(wsRename, name), nil
 	case "d":
-		if m.CursorIsAll() {
+		if m.CursorIsAll() || len(m.data.Names) == 0 {
 			return m, nil
 		}
 		m.mode, m.err = WorkspaceModeConfirmDelete, ""
@@ -265,13 +312,13 @@ func (m WorkspaceModal) updateForm(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 			m.err = "workspace name is required"
 			return m, nil
 		}
-		old, _ := m.CursorName()
 		if m.mode == WorkspaceModeCreate {
 			v := value
-			return m.openForm(wsCreate, v), func() tea.Msg { return WorkspaceCreateMsg{Name: v} }
+			return m.openForm(wsCreate, v).decide(WorkspaceCreateMsg{Name: v})
 		}
+		old, _ := m.CursorName()
 		v := value
-		return m.openForm(wsRename, v), func() tea.Msg { return WorkspaceRenameMsg{OldName: old, NewName: v} }
+		return m.openForm(wsRename, v).decide(WorkspaceRenameMsg{OldName: old, NewName: v})
 	case tea.KeyRunes:
 		k.Runes = stripNewlines(k.Runes)
 		if len(k.Runes) == 0 {
@@ -294,7 +341,7 @@ func (m WorkspaceModal) updateConfirm(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 	case "y", "Y":
 		m.mode = WorkspaceModeManage
 		name, _ := m.CursorName()
-		return m, func() tea.Msg { return WorkspaceDeleteMsg{Name: name} }
+		return m.decide(WorkspaceDeleteMsg{Name: name})
 	case "n", "N", "esc", "enter":
 		m.mode = WorkspaceModeManage
 	}
@@ -305,7 +352,7 @@ func (m WorkspaceModal) updateAssign(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 	switch k.String() {
 	case "esc", "q":
 		alias := m.target
-		return m, func() tea.Msg { return WorkspaceAssignCancelMsg{Alias: alias} }
+		return m.decide(WorkspaceAssignCancelMsg{Alias: alias})
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -320,7 +367,7 @@ func (m WorkspaceModal) updateAssign(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 			return m, nil
 		}
 		alias, name := m.target, ch[m.cursor]
-		return m, func() tea.Msg { return WorkspaceAssignMsg{Alias: alias, Name: name} }
+		return m.decide(WorkspaceAssignMsg{Alias: alias, Name: name})
 	}
 	return m, nil
 }

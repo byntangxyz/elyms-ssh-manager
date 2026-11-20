@@ -9,7 +9,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"elyms/internal/config"
 	"elyms/internal/ssh"
+	"elyms/internal/ui/views"
 	"elyms/internal/workspace"
 )
 
@@ -91,6 +93,18 @@ func createAndLeave(m Model, name string) Model {
 	return key(createWS(m, name), "esc")
 }
 
+// writeMeta writes the workspace metadata file the way a previous run would
+// have left it.
+func (e *wsEnv) writeMeta(t *testing.T, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(e.wsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.wsPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWOpensWorkspaceManager(t *testing.T) {
 	_, m := newWSEnv(t, cfgSample)
 	m = key(m, "w")
@@ -115,6 +129,162 @@ func TestWOpensWorkspaceManager(t *testing.T) {
 	}
 }
 
+// reloadConfig re-reads the SSH config the way a host edit does.
+func (m Model) reloadConfig(t *testing.T) *config.Config {
+	t.Helper()
+	cfg, err := m.reload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// TestEditRenameKeepsHostWorkspace covers renaming a host inside elyms while
+// it is assigned: the assignment follows the new alias and the list is not
+// left stranded in an empty workspace.
+func TestEditRenameKeepsHostWorkspace(t *testing.T) {
+	e, m := newWSEnv(t, "Host web\n  HostName 10.0.0.1\n\nHost *\n  Compression yes\n")
+	m = createAndLeave(m, "Dev")
+	m = key(m, "g")
+	m = key(m, "j")
+	m = key(m, "enter") // web -> Dev, back in the list
+	m = key(m, "w")
+	m = key(m, "j")
+	m = key(m, "enter") // enter Dev
+	if got := m.list.Workspace(); got != "Dev" {
+		t.Fatalf("context = %q", got)
+	}
+	m = key(m, "e")
+	m = key(m, "backspace")
+	m = key(m, "backspace")
+	m = key(m, "backspace") // erase "web"
+	m = typ(m, "web2")
+	m = key(m, "enter")
+	if m.mode != modeList {
+		t.Fatalf("saving the edit should return to the list, mode = %v\n%s", m.mode, m.View())
+	}
+	if strings.Contains(m.View(), "No hosts in") {
+		t.Errorf("the renamed host should still be visible in Dev:\n%s", m.View())
+	}
+	if len(m.list.Visible()) != 1 || m.list.Visible()[0].Alias != "web2" {
+		var got []string
+		for _, h := range m.list.Visible() {
+			got = append(got, h.Alias)
+		}
+		t.Errorf("visible in Dev = %v, want [web2]", got)
+	}
+	if got := e.meta().Assignments["web2"]; got != "Dev" {
+		t.Errorf("assignment should follow the rename, metadata = %+v", e.meta())
+	}
+}
+
+// TestDeleteLastHostInWorkspaceLeavesEmptyState covers deleting the only host
+// of the active workspace: the list still shows the empty workspace and w
+// still gets the user back to All.
+func TestDeleteLastHostInWorkspaceLeavesEmptyState(t *testing.T) {
+	_, m := newWSEnv(t, "Host web\n  HostName 10.0.0.1\n\nHost *\n  Compression yes\n")
+	m = createAndLeave(m, "Dev")
+	m = key(m, "g")
+	m = key(m, "j")
+	m = key(m, "enter")
+	m = key(m, "w")
+	m = key(m, "j")
+	m = key(m, "enter") // in Dev
+	m = key(m, "d")
+	m = key(m, "y")
+	if !strings.Contains(m.View(), "No hosts in Dev") {
+		t.Errorf("the empty workspace should say so:\n%s", m.View())
+	}
+	m = key(m, "w")
+	if got := m.list.Workspace(); got != "" {
+		t.Fatalf("w should leave the empty workspace, context = %q", got)
+	}
+	// Leaving an empty workspace lands somewhere visible: either a
+	// confirmation on the list or the manager itself.
+	if m.mode != modeWorkspace && !strings.Contains(m.View(), "Showing all hosts") {
+		t.Errorf("w should confirm leaving or open the manager, mode = %v status = %q", m.mode, m.status)
+	}
+}
+
+func TestRefreshNeverMovesPatternAssignments(t *testing.T) {
+	e, m := newWSEnv(t, "Host web\n  HostName 10.0.0.1\n\nHost *\n  Compression yes\n")
+	e.writeMeta(t, `{"version":1,"workspaces":["Dev"],"assignments":{"*":"Dev"}}`)
+	m = openWS(t, e.env, e.wsPath)
+	if got := m.list.WorkspaceOf("*"); got != "Dev" {
+		t.Fatalf("setup: * should start in Dev, got %q", got)
+	}
+	if err := os.WriteFile(e.cfgPath, []byte("Host web\n  HostName 10.0.0.1\n\nHost *\n  Compression yes\n\nHost *.internal\n  User ops\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.refreshWorkspaces(m.reloadConfig(t))
+	if got := m.ws.WorkspaceOf("*"); got != "Dev" {
+		t.Errorf("* should keep its own assignment, got %q", got)
+	}
+	if got := m.ws.WorkspaceOf("*.internal"); got != "" {
+		t.Errorf("a new pattern must not inherit another pattern's workspace, got %q", got)
+	}
+}
+
+func TestRefreshDoesNotGuessForIdentityLessHosts(t *testing.T) {
+	e, m := newWSEnv(t, "Host alpha\n\nHost beta\n  HostName 10.0.0.9\n")
+	e.writeMeta(t, `{"version":1,"workspaces":["Dev","Prod"],"assignments":{"alpha":"Dev","beta":"Prod"}}`)
+	m = openWS(t, e.env, e.wsPath)
+	// A rename that changes both the alias and the identity: no host in the
+	// new config can be identified as the old one.
+	if err := os.WriteFile(e.cfgPath, []byte("Host gamma\n  HostName 10.0.0.7\n\nHost beta\n  HostName 10.0.0.9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.refreshWorkspaces(m.reloadConfig(t))
+	if got := m.ws.WorkspaceOf("gamma"); got != "" {
+		t.Errorf("an unrelated host must not inherit alpha's workspace, got %q", got)
+	}
+	if got := m.ws.WorkspaceOf("beta"); got != "Prod" {
+		t.Errorf("an unchanged assignment must stay put, got %q", got)
+	}
+}
+
+func TestMalformedMetadataIsRecheckedOnHostEdit(t *testing.T) {
+	e, _ := newEnv(t, cfgSample)
+	dir := filepath.Join(t.TempDir(), "elyms")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "workspaces.json")
+	if err := os.WriteFile(bad, []byte(`not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := openWS(t, e, bad)
+	if !m.statusErr {
+		t.Fatalf("setup: the broken file should be reported, status = %q", m.status)
+	}
+	// The user fixes the file while elyms is running.
+	if err := os.WriteFile(bad, []byte(`{"version":1,"workspaces":["Dev"],"assignments":{"web":"Dev"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = key(m, "d")
+	m = key(m, "y") // delete web: reloads the config and the metadata
+	if m.statusErr {
+		t.Errorf("a repaired file should clear the error, status = %q", m.status)
+	}
+	if m.ws == nil {
+		t.Fatalf("the repaired metadata should be in use")
+	}
+	// The next save works on the repaired file instead of refusing.
+	m = key(m, "w")
+	m = key(m, "n")
+	m = typ(m, "Ops")
+	m = key(m, "enter")
+	var f workspaceFile
+	if b, err := os.ReadFile(bad); err != nil {
+		t.Fatal(err)
+	} else if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Workspaces) != 2 || f.Workspaces[1] != "Ops" {
+		t.Errorf("metadata = %+v, want the repaired file plus Ops", f)
+	}
+}
+
 func TestWOpensManagerWhileSearchIsApplied(t *testing.T) {
 	_, m := newWSEnv(t, cfgSample)
 	m = createAndLeave(m, "Dev")
@@ -133,6 +303,9 @@ func TestWOpensManagerWhileSearchIsApplied(t *testing.T) {
 	m = key(m, "w")
 	if m.mode != modeWorkspace {
 		t.Fatalf("w with an applied search should open the manager, mode = %v\n%s", m.mode, m.View())
+	}
+	if got := m.list.Workspace(); got != "" {
+		t.Errorf("w should have left the workspace, context = %q", got)
 	}
 }
 
@@ -221,8 +394,9 @@ func TestCreateWorkspaceWithoutNameExplains(t *testing.T) {
 	}
 }
 
-// TestWInWorkspaceContextLeavesItThenOpensManager documents the one-key
-// design: inside a workspace context w goes back to All, and a second w opens
+// TestWInWorkspaceContextLeavesItThenOpensManager documents the interaction:
+// inside a workspace context w goes back to All (opening the manager too when
+// the workspace has nothing to show, as Dev does here), and a second w opens
 // the manager.
 func TestWInWorkspaceContextLeavesItThenOpensManager(t *testing.T) {
 	_, m := newWSEnv(t, cfgSample)
@@ -236,12 +410,58 @@ func TestWInWorkspaceContextLeavesItThenOpensManager(t *testing.T) {
 	if m.list.Workspace() != "" {
 		t.Errorf("w should leave the workspace context, ws = %q", m.list.Workspace())
 	}
-	if m.mode != modeList {
-		t.Errorf("leaving the context should not open a modal, mode = %v", m.mode)
+	if m.mode != modeWorkspace {
+		t.Errorf("an empty workspace should open the manager on leave, mode = %v", m.mode)
 	}
+	m = key(m, "esc")
 	m = key(m, "w")
 	if m.mode != modeWorkspace {
 		t.Fatalf("w from All should open the manager, mode = %v", m.mode)
+	}
+}
+
+func TestWInPopulatedWorkspaceOnlyLeaves(t *testing.T) {
+	_, m := newWSEnv(t, cfgSample)
+	m = createAndLeave(m, "Dev")
+	m = key(m, "g") // web -> Dev
+	m = key(m, "j")
+	m = key(m, "enter")
+	m = key(m, "w")
+	m = key(m, "j")
+	m = key(m, "enter")
+	if m.list.Workspace() != "Dev" || len(m.list.Visible()) != 1 {
+		t.Fatalf("setup: ws = %q visible = %d", m.list.Workspace(), len(m.list.Visible()))
+	}
+	m = key(m, "w")
+	if m.list.Workspace() != "" {
+		t.Errorf("w should leave the workspace context, ws = %q", m.list.Workspace())
+	}
+	if m.mode != modeList {
+		t.Errorf("leaving a populated workspace should just show All, mode = %v", m.mode)
+	}
+	if m.status != "Showing all hosts" {
+		t.Errorf("leaving should be confirmed, status = %q", m.status)
+	}
+}
+
+func TestManagerSettlesWhenMetadataVanishesUnderIt(t *testing.T) {
+	_, m := newWSEnv(t, cfgSample)
+	m = createAndLeave(m, "Dev")
+	m = key(m, "w")
+	m = key(m, "j") // Dev
+	// The metadata loses Dev while the manager is open (another elyms, an
+	// editor): the cursor row no longer exists, so the next key settles it
+	// on All rather than acting on a workspace that is gone.
+	m.wsModal = m.wsModal.SetData(views.WorkspaceData{})
+	m = key(m, "enter")
+	if m.list.Workspace() != "" {
+		t.Errorf("no vanished workspace should be entered, ws = %q", m.list.Workspace())
+	}
+	m = key(m, "w")
+	m = key(m, "enter")
+	if m.mode != modeList || m.list.Workspace() != "" {
+		t.Errorf("after settling, enter on All should leave the manager, mode = %v ws = %q",
+			m.mode, m.list.Workspace())
 	}
 }
 
@@ -635,7 +855,6 @@ func TestHintLineFilteringShowsOnlySearchHints(t *testing.T) {
 		t.Errorf("workspace keys cannot run while typing a query: %q", hints)
 	}
 }
-
 
 // TestWorkspaceLifecycleNeverTouchesSSHConfig walks every workspace operation
 // and asserts the SSH config bytes are identical at each step.

@@ -71,7 +71,9 @@ The installer is not included yet. Installation instructions will be added when 
 Workspaces are optional named groups of hosts. They are only a view of your
 hosts: every connection setting still lives in `%USERPROFILE%\.ssh\config`.
 
-- With the list showing **All**, press `w` to open the workspace manager.
+- With the list showing **All**, press `w` to open the workspace manager. Move
+  with `j`/`k` (or `g`/`G` for the first and last row) and leave it with
+  `esc` or `q`.
 - `n` creates a workspace, `r` renames one, and `d` deletes one (with a
   confirmation). `Enter` switches the list to that workspace, and `Enter` on
   **All** goes back to every host.
@@ -79,6 +81,8 @@ hosts: every connection setting still lives in `%USERPROFILE%\.ssh\config`.
   it out again. `Host *`-style patterns are never assignable.
 - In **All**, hosts are grouped under their workspace sections first, then
   **Unassigned**; within each section they keep their order in the SSH config.
+  A row highlighted in the manager switches only when you press `Enter`;
+  creating, renaming, or deleting a workspace leaves the list where it was.
 - Search filters only the workspace you are currently in. Press `w` to leave a
   workspace and see all hosts again.
 

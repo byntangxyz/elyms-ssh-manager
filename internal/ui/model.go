@@ -1,9 +1,9 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -57,7 +57,7 @@ type Model struct {
 	// could not be read (in which case saving is refused, never guessed at).
 	ws      *workspace.Store
 	wsErr   error
-	wsHosts []*config.HostEntry // the hosts ws was loaded for
+	wsHosts map[string]*config.HostEntry // the hosts ws was loaded for
 
 	status    string
 	statusErr bool
@@ -88,7 +88,7 @@ func (m *Model) loadWorkspace(cfg *config.Config) error {
 		aliases = append(aliases, h.Alias)
 	}
 	st, err := workspace.Load(m.opts.WorkspacePath, aliases)
-	m.wsHosts = hosts
+	m.wsHosts = toHostMap(hosts)
 	if err != nil {
 		m.ws, m.wsErr = nil, err
 		m.list.SetWorkspaceData(nil, nil)
@@ -183,18 +183,18 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list, _ = m.list.Update(msg)
 		return m, nil
 	}
-	// w leaves a workspace context and returns to All; with no context it
-	// opens the manager below. With a search applied it must still open the
-	// manager: the list's own handler would consume it and do nothing.
+	// w with no workspace context opens the manager (below). Inside a
+	// workspace it returns to All, and with a search applied or a workspace
+	// that lost its hosts it also opens the manager, so the key never does
+	// nothing visible.
 	if k.String() == "w" && m.list.Workspace() != "" {
-		if m.list.HasFilter() {
-			m.list, _ = m.list.Update(k)
-			m.list.SetHeight(m.listHeight())
+		leave := m.list.HasFilter() || len(m.list.Visible()) == 0
+		m.list.SetWorkspace("")
+		m.list.SetHeight(m.listHeight())
+		if leave {
 			m.status = ""
 			return m.openWorkspace(""), nil
 		}
-		m.list, _ = m.list.Update(k)
-		m.list.SetHeight(m.listHeight())
 		return m.setStatus("Showing all hosts", false), nil
 	}
 	sel := m.list.Selected()
@@ -285,8 +285,9 @@ func (m Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.list.SetHosts(cfg.Hosts())
 		m.list.SelectAlias(e.Alias)
+		status, err := m.resyncAfterHostChange(cfg, "Saved "+e.Alias, e.Alias)
 		m.mode = modeList
-		return m.setStatus("Saved "+e.Alias, false), nil
+		return m.setStatus(status, err != nil), nil
 	}
 	var cmd tea.Cmd
 	m.form, cmd = m.form.Update(msg)
@@ -317,75 +318,161 @@ func (m Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The host was edited away outside elyms: resync so the list
 			// stops offering it instead of leaving a stale row.
 			m.list.SetHosts(cfg.Hosts())
-			m.refreshWorkspaces(cfg)
-			return m.setStatus("Host \""+res.Payload+"\" no longer exists", true), nil
+			status, rerr := m.resyncAfterHostChange(cfg, "Host \""+res.Payload+"\" no longer exists", res.Payload)
+			return m.setStatus(status, rerr != nil), nil
 		}
 		if err := cfg.Save(); err != nil {
 			return m.setStatus("could not save: "+err.Error(), true), nil
 		}
 		m.list.SetHosts(cfg.Hosts())
-		m.refreshWorkspaces(cfg)
-		return m.setStatus("Deleted "+res.Payload, false), nil
+		status, rerr := m.resyncAfterHostChange(cfg, "Deleted "+res.Payload, res.Payload)
+		return m.setStatus(status, rerr != nil), nil
 	}
 	var cmd tea.Cmd
 	m.confirm, cmd = m.confirm.Update(msg)
 	return m, cmd
 }
 
-// refreshWorkspaces reconciles metadata with a freshly loaded config. Hosts
-// added, renamed, or removed outside elyms update the visible grouping, while
-// stale assignments stay on disk (never rewritten here) and are ignored until
-// their host comes back.
-func (m *Model) refreshWorkspaces(cfg *config.Config) {
+// refreshOutcome says what a config resync found.
+type refreshOutcome int
+
+const (
+	refreshNone        refreshOutcome = iota // nothing to reload
+	refreshKept                              // metadata unchanged
+	refreshAdopted                           // a previously broken file was read
+	refreshStillBroken                       // the metadata file is still unreadable
+)
+
+// refreshWorkspaces resyncs the visible grouping with a freshly loaded config
+// after a host edit or delete, and returns any assignment that follows a host
+// renamed outside elyms (old alias -> workspace, new alias -> workspace) for
+// the caller to save. A broken metadata file is retried, so one repaired while
+// elyms was open is adopted. Patterns never move, and a move is only proposed
+// when exactly one host in the new config carries the old host's identity.
+func (m *Model) refreshWorkspaces(cfg *config.Config) (refreshOutcome, map[string]aliasMove) {
+	if m.opts.WorkspacePath == "" {
+		return refreshNone, nil
+	}
+	hosts := cfg.Hosts()
 	if m.ws == nil {
-		if m.wsErr != nil && m.opts.WorkspacePath != "" {
-			_ = m.loadWorkspace(cfg)
+		if m.wsErr == nil {
+			return refreshNone, nil
 		}
-		return
+		if err := m.loadWorkspace(cfg); err != nil {
+			m.wsHosts = toHostMap(hosts)
+			return refreshStillBroken, nil
+		}
+		m.wsHosts = toHostMap(hosts)
+		return refreshAdopted, nil
 	}
-	gone := map[string]*config.HostEntry{}
-	for _, h := range m.wsHosts {
-		gone[h.Alias] = h
-	}
-	for _, h := range cfg.Hosts() {
-		delete(gone, h.Alias)
-	}
-	// A rename leaves one alias gone and one new alias in the config; moving
-	// the assignment over keeps a host's workspace across edits.
-	for _, h := range cfg.Hosts() {
-		if m.ws.WorkspaceOf(h.Alias) != "" {
+
+	moves := map[string]aliasMove{}
+	for oldAlias, old := range m.wsHosts {
+		if cfg.Has(oldAlias) || old.IsPattern {
 			continue
 		}
-		for oldAlias := range gone {
-			w := m.ws.WorkspaceOf(oldAlias)
-			if w == "" {
-				continue
-			}
-			if old := gone[oldAlias]; old.IsPattern == h.IsPattern && old.HostName == h.HostName {
-				if err := m.ws.Assign(h.Alias, w); err == nil {
-					m.ws.Unassign(oldAlias)
-					delete(gone, oldAlias)
-					break
-				}
-			}
+		w := m.ws.WorkspaceOf(oldAlias)
+		if w == "" {
+			continue
+		}
+		if next := renamedInto(old, hosts); next != "" && m.ws.WorkspaceOf(next) == "" {
+			move := aliasMove{OldAlias: oldAlias, To: next, Workspace: w}
+			moves[next] = move
 		}
 	}
-	m.wsHosts = cfg.Hosts()
+	m.wsHosts = toHostMap(hosts)
 	m.list.SetWorkspaceData(m.ws.Workspaces(), m.ws.Assignments())
+	return refreshKept, moves
+}
+
+// aliasMove carries a host's workspace from OldAlias to To.
+type aliasMove struct {
+	OldAlias  string
+	To        string
+	Workspace string
+}
+
+func toHostMap(hosts []*config.HostEntry) map[string]*config.HostEntry {
+	out := make(map[string]*config.HostEntry, len(hosts))
+	for _, h := range hosts {
+		out[h.Alias] = h
+	}
+	return out
+}
+
+// renamedInto returns the single unassigned host in hosts that still looks
+// like old (same HostName and User, stronger identity first), or "".
+func renamedInto(old *config.HostEntry, hosts []*config.HostEntry) string {
+	if old.HostName == "" {
+		return ""
+	}
+	byIdentity, byHost := "", ""
+	for _, h := range hosts {
+		if h.IsPattern || h.Alias == old.Alias || h.HostName == "" {
+			continue
+		}
+		if h.HostName != old.HostName {
+			continue
+		}
+		if h.User != old.User {
+			continue
+		}
+		if h.Port == old.Port && h.IdentityFile != "" && h.IdentityFile == old.IdentityFile {
+			if byIdentity != "" {
+				return "" // ambiguous
+			}
+			byIdentity = h.Alias
+			continue
+		}
+		if byHost != "" {
+			return "" // ambiguous
+		}
+		byHost = h.Alias
+	}
+	if byIdentity != "" {
+		return byIdentity
+	}
+	return byHost
+}
+
+// resyncAfterHostChange refreshes the workspace view after a host edit or
+// delete. An assignment whose host was just renamed is moved onto the new
+// alias and saved; any other pending move is left for the next save, which
+// re-reads the metadata from disk the way saveWorkspace does.
+func (m *Model) resyncAfterHostChange(cfg *config.Config, base, edited string) (string, error) {
+	outcome, moves := m.refreshWorkspaces(cfg)
+	switch outcome {
+	case refreshAdopted:
+		return "Workspace metadata reloaded; " + strings.ToLower(base), nil
+	case refreshStillBroken:
+		return base + "; workspace metadata still unreadable", errors.New("workspace metadata")
+	}
+	move, ok := moves[edited]
+	if !ok {
+		return base, nil
+	}
+	if _, err := m.saveWorkspace(func(s *workspace.Store) (string, error) {
+		s.Unassign(move.OldAlias)
+		err := s.Assign(move.To, move.Workspace)
+		return move.Workspace, err
+	}); err != nil {
+		return base + "; could not move its workspace: " + err.Error(), err
+	}
+	return base + " in workspace " + move.Workspace, nil
 }
 
 // updateWorkspace handles the workspace manager and the assign chooser. Every
 // mutation builds a candidate store, saves it, and only then touches the
 // visible list, so a failed save changes nothing.
 func (m Model) updateWorkspace(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Keystrokes are answered with the modal's typed message as a command, so
-	// that command has to reach the runtime. The textinput cursor blink a key
-	// can also return is dropped: a blink timer would swallow the next
-	// keypress in the update loop below.
-	next, cmd := m.wsModal.Update(msg)
+	// The modal owns its keys: it hands back the action a keystroke decided
+	// synchronously (TakeAction), so no command runs and the textinput's
+	// cursor-blink timer can never stall the next keypress.
+	next, _ := m.wsModal.Update(msg)
+	pending, hasAction := next.TakeAction()
 	m.wsModal = next
-	if _, ok := msg.(tea.KeyMsg); ok {
-		cmd = workspaceCmd(cmd)
+	if _, ok := msg.(tea.KeyMsg); ok && hasAction {
+		msg = pending
 	}
 	switch msg := msg.(type) {
 	case views.WorkspaceModalCloseMsg:
@@ -448,37 +535,7 @@ func (m Model) updateWorkspace(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// A create or rename that succeeds leaves the manager showing the new
 	// list underneath the result status; a failed one keeps the form and its
 	// typed value.
-	return m, cmd
-}
-
-// workspaceCmd lets one of the modal's own typed messages through and drops
-// everything else (the textinput cursor blink, above all: a blink timer would
-// swallow the user's next keypress). The probe runs in the background so the
-// update loop never waits on a timer.
-func workspaceCmd(cmd tea.Cmd) tea.Cmd {
-	if cmd == nil {
-		return nil
-	}
-	ch := make(chan tea.Msg, 1)
-	go func() { ch <- cmd() }()
-	select {
-	case out := <-ch:
-		switch out.(type) {
-		case views.WorkspaceCreateMsg, views.WorkspaceRenameMsg, views.WorkspaceDeleteMsg,
-			views.WorkspaceSelectMsg, views.WorkspaceAssignMsg, views.WorkspaceAssignCancelMsg,
-			views.WorkspaceModalCloseMsg:
-			return func() tea.Msg { return out }
-		}
-	case <-time.After(2 * time.Millisecond):
-	}
-	return nil
-}
-
-// backToList closes any workspace dialog and returns to the host list.
-func (m Model) backToList() Model {
-	m.mode = modeList
-	m.wsModal = views.NewWorkspaceModal(views.WorkspaceData{})
-	return m
+	return m, nil
 }
 
 // saveWorkspace applies op to a copy of the metadata, saves it, and only on
@@ -515,7 +572,7 @@ func (m *Model) saveWorkspace(op func(s *workspace.Store) (string, error)) (stri
 		return "", fmt.Errorf("could not save workspace metadata: %v", err)
 	}
 	m.ws = cand
-	m.wsHosts = hosts
+	m.wsHosts = toHostMap(hosts)
 	m.list.SetWorkspaceData(cand.Workspaces(), cand.Assignments())
 	// The manager stays open after a mutation; keep its rows current.
 	m.wsModal = m.wsModal.SetData(views.WorkspaceData{
@@ -542,14 +599,6 @@ func (m Model) openWorkspace(target string) Model {
 		assignments = m.ws.Assignments()
 	}
 	data := views.WorkspaceData{Names: names, Assignments: assignments, Target: target}
-	if target != "" {
-		data.Selected = target
-		for _, h := range m.wsHosts {
-			if h.Alias == target {
-				data.SelectedIsPattern = h.IsPattern
-			}
-		}
-	}
 	m.wsModal = views.NewWorkspaceModal(data)
 	m.mode = modeWorkspace
 	return m
