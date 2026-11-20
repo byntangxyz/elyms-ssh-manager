@@ -84,9 +84,6 @@ func send(m Model, msg tea.Msg) Model {
 		if out == nil {
 			break
 		}
-		if _, isBatch := out.(tea.BatchMsg); isBatch {
-			break
-		}
 		next, cmd = m.Update(out)
 		m = next.(Model)
 	}

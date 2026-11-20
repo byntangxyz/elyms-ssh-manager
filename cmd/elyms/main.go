@@ -10,6 +10,7 @@ import (
 	"elyms/internal/config"
 	"elyms/internal/ssh"
 	"elyms/internal/ui"
+	"elyms/internal/workspace"
 )
 
 func main() {
@@ -28,13 +29,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Workspace metadata lives beside the app's data, never in the SSH
+	// directory: a failure to resolve it only disables workspaces.
+	wsPath, err := workspace.DefaultPath()
+	if err != nil {
+		wsPath = ""
+	}
 
 	model, err := ui.New(ui.Options{
-		ConfigPath:   cfgPath,
-		SSHDir:       sshDir,
-		Connect:      ssh.Connect,
-		Copy:         clipboard.WriteAll,
-		SSHAvailable: ssh.Available(),
+		ConfigPath:    cfgPath,
+		SSHDir:        sshDir,
+		WorkspacePath: wsPath,
+		Connect:       ssh.Connect,
+		Copy:          clipboard.WriteAll,
+		SSHAvailable:  ssh.Available(),
 	})
 	if err != nil {
 		return fmt.Errorf("cannot read %s: %w", cfgPath, err)

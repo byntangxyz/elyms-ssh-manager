@@ -199,7 +199,8 @@ func (l *HostList) clamp() {
 	if l.cursor < 0 {
 		l.cursor = 0
 	}
-	l.scrollIntoView()
+	// Do not scroll here: regrouping keeps the viewport still while
+	// reanchor decides which row is highlighted.
 }
 
 // reanchor keeps the cursor on alias after the grouping changed. When the
@@ -209,6 +210,7 @@ func (l *HostList) reanchor(alias string, oldPos int) {
 	if alias == "" || len(l.visible) == 0 || !l.anchored {
 		l.anchored = false
 		l.clamp()
+		l.scrollIntoView()
 		return
 	}
 	newPos := -1
@@ -223,13 +225,14 @@ func (l *HostList) reanchor(alias string, oldPos int) {
 		l.clamp()
 	case newPos > oldPos && oldPos < len(l.visible)-1:
 		l.cursor = oldPos + 1
-		l.clamp()
 	case newPos < oldPos && oldPos > 0:
 		l.cursor = oldPos - 1
-		l.clamp()
 	default:
-		l.SelectAlias(alias)
+		l.cursor = newPos
+		l.anchored = true
 	}
+	l.clamp()
+	l.scrollIntoView()
 }
 
 func (l *HostList) scrollIntoView() {
@@ -253,9 +256,21 @@ func (l *HostList) move(delta int) {
 	l.clamp()
 }
 
+func (l *HostList) leaveWorkspace() {
+	l.wsActive = ""
+	l.refilter()
+}
+
+// Update handles navigation, search, and leaving a workspace context. w is
+// the model's workspace key, so it is only consumed here to leave a context.
 func (l HostList) Update(msg tea.Msg) (HostList, tea.Cmd) {
 	k, ok := msg.(tea.KeyMsg)
 	if !ok {
+		return l, nil
+	}
+	if !l.filtering && l.wsActive != "" && k.String() == "w" {
+		l.anchored = false
+		l.leaveWorkspace()
 		return l, nil
 	}
 	switch k.Type {

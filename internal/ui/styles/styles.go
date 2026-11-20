@@ -42,7 +42,12 @@ func Panel(focused bool) lipgloss.Style {
 		Padding(0, 1)
 }
 
+// Modal frames content at exactly width columns (or 14 when narrower), so a
+// caller can budget the border and padding itself.
 func Modal(width int) lipgloss.Style {
+	if width < 14 {
+		width = 14
+	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(Accent).

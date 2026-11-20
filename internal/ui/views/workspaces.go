@@ -113,6 +113,27 @@ func (m WorkspaceModal) SetErr(err error) WorkspaceModal {
 	return m
 }
 
+// Acknowledge closes a create or rename form after the root model saved it, so
+// the manager is back on screen for the next action. Other panels are left
+// alone.
+func (m WorkspaceModal) Acknowledge() WorkspaceModal {
+	if m.mode == WorkspaceModeCreate || m.mode == WorkspaceModeRename {
+		m, _ = m.backToManage()
+	}
+	return m
+}
+
+// SetData replaces the workspace list and assignments the modal renders. The
+// cursor stays where it is unless the list shrank.
+func (m WorkspaceModal) SetData(data WorkspaceData) WorkspaceModal {
+	data.Target = m.target
+	m.data = data
+	if m.cursor >= m.managerChoices() {
+		m.cursor = m.managerChoices() - 1
+	}
+	return m
+}
+
 // CursorIsAll reports whether All is highlighted in the manager.
 func (m WorkspaceModal) CursorIsAll() bool { return m.cursor == 0 }
 
@@ -180,6 +201,11 @@ func (m WorkspaceModal) Update(msg tea.Msg) (WorkspaceModal, tea.Cmd) {
 	return m.updateManage(k)
 }
 
+func (m WorkspaceModal) setMode(mode WorkspaceMode) WorkspaceModal {
+	m.mode = mode
+	return m
+}
+
 func (m WorkspaceModal) updateManage(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 	switch k.String() {
 	case "esc", "q":
@@ -198,7 +224,7 @@ func (m WorkspaceModal) updateManage(k tea.KeyMsg) (WorkspaceModal, tea.Cmd) {
 		m.cursor = m.managerChoices() - 1
 	case "enter":
 		name, _ := m.CursorName()
-		return m, func() tea.Msg { return WorkspaceSelectMsg{Name: name} }
+		return m.setMode(WorkspaceModeManage), func() tea.Msg { return WorkspaceSelectMsg{Name: name} }
 	case "n":
 		return m.openForm(wsCreate, ""), nil
 	case "r":

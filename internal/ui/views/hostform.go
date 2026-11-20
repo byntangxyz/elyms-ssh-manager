@@ -187,7 +187,7 @@ func (f HostForm) View(width int) string {
 	if f.original != nil {
 		title = "Edit host"
 	}
-	inner := width - 6
+	inner := width - 8
 	if inner < 20 {
 		inner = 20
 	}

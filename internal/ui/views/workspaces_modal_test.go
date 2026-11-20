@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -21,16 +22,26 @@ func sendWS(m WorkspaceModal, msg tea.Msg) WorkspaceModal {
 	return next
 }
 
+// typeWS feeds text one key at a time, answering the textinput's cursor-blink
+// commands so the keystrokes land like they do in the running program.
+func typeWS(m WorkspaceModal, s string) WorkspaceModal {
+	for _, r := range s {
+		var cmd tea.Cmd
+		m, cmd = m.Update(runes(string(r)))
+		for cmd != nil {
+			out := cmd()
+			if _, blink := out.(cursor.BlinkMsg); !blink {
+				break
+			}
+			m, cmd = m.Update(out)
+		}
+	}
+	return m
+}
+
 func submitWS(m WorkspaceModal) tea.Msg {
 	_, cmd := m.Update(special(tea.KeyEnter))
 	return msgOf(cmd)
-}
-
-func typeWS(m WorkspaceModal, s string) WorkspaceModal {
-	for _, r := range s {
-		m = sendWS(m, runes(string(r)))
-	}
-	return m
 }
 
 func TestWorkspaceManagerListsAllAndWorkspaces(t *testing.T) {

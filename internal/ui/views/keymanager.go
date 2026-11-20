@@ -249,8 +249,8 @@ func (m KeyManager) View(width, height int) string {
 	if m.generating {
 		return m.viewGenerate(width, height)
 	}
-	inner := width - 6
-	budget := height - modalChrome
+	inner := width - 8
+	budget := height - modalChrome - 2
 	if budget < 6 {
 		budget = 6
 	}
@@ -333,7 +333,7 @@ func (m KeyManager) View(width, height int) string {
 }
 
 func (m KeyManager) viewGenerate(width, height int) string {
-	inner := width - 6
+	inner := width - 8
 	var b strings.Builder
 	b.WriteString(styles.Title.Render("Generate key") + "\n\n")
 	label := func(i int, s string) string {

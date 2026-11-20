@@ -2,6 +2,7 @@ package views
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"elyms/internal/ui/styles"
 )
@@ -39,8 +40,13 @@ func (c Confirm) Update(msg tea.Msg) (Confirm, tea.Cmd) {
 }
 
 func (c Confirm) View(width int) string {
-	body := styles.Title.Render("Confirm") + "\n\n" +
-		styles.Body.Render(c.prompt) + "\n\n" +
-		styles.Hint("y", "yes") + "   " + styles.Hint("n", "no (default)")
-	return styles.Modal(width).Render(body)
+	dialog := width
+	if dialog < 14 {
+		dialog = 14
+	}
+	inner := dialog - 6
+	body := ansi.Truncate(styles.Title.Render("Confirm"), inner, "…") + "\n\n" +
+		styles.Body.Render(ansi.Hardwrap(c.prompt, inner, true)) + "\n\n" +
+		ansi.Truncate(styles.Hint("y", "yes")+"   "+styles.Hint("n", "no (default)"), inner, "…")
+	return styles.Modal(dialog).Render(body)
 }
