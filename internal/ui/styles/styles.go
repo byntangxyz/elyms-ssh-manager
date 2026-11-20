@@ -47,7 +47,7 @@ func Modal(width int) lipgloss.Style {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(Accent).
 		Padding(1, 2).
-		Width(width)
+		Width(width - 2).MaxWidth(width)
 }
 
 // Hint renders "key description" pairs for the status bar.

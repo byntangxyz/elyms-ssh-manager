@@ -22,9 +22,68 @@ type HostList struct {
 	cursor    int
 	offset    int
 	height    int
+	// anchored is true once the user (or an explicit SelectAlias) chose the
+	// cursor, so regrouping keeps that host instead of clamping.
+	anchored bool
+
+	// Workspace context: names in display order, one workspace per alias, and
+	// the active workspace ("" means All).
+	wsNames  []string
+	wsOf     map[string]string
+	wsActive string
 }
 
 func NewHostList() HostList { return HostList{height: 10} }
+
+// SetWorkspaceData sets the workspace sections and host assignments. The list
+// only renders what it is given; persistence stays in the root model.
+func (l *HostList) SetWorkspaceData(names []string, assignments map[string]string) {
+	keep := ""
+	oldPos := l.cursor
+	if s := l.Selected(); s != nil {
+		keep = s.Alias
+	}
+	l.wsNames = append([]string(nil), names...)
+	l.wsOf = make(map[string]string, len(assignments))
+	for k, v := range assignments {
+		l.wsOf[k] = v
+	}
+	if l.wsActive != "" && !l.hasWorkspace(l.wsActive) {
+		l.wsActive = ""
+	}
+	l.refilter()
+	l.reanchor(keep, oldPos)
+}
+
+// SetWorkspace switches the list context: "" is All, otherwise a workspace
+// name. Unknown names fall back to All.
+func (l *HostList) SetWorkspace(name string) {
+	keep := ""
+	oldPos := l.cursor
+	if s := l.Selected(); s != nil {
+		keep = s.Alias
+	}
+	if name != "" && !l.hasWorkspace(name) {
+		name = ""
+	}
+	l.wsActive = name
+	l.refilter()
+	l.reanchor(keep, oldPos)
+}
+
+func (l HostList) Workspace() string    { return l.wsActive }
+func (l HostList) Workspaces() []string { return append([]string(nil), l.wsNames...) }
+
+func (l HostList) WorkspaceOf(alias string) string { return l.wsOf[alias] }
+
+func (l *HostList) hasWorkspace(name string) bool {
+	for _, n := range l.wsNames {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
 
 func (l *HostList) SetHosts(hosts []*config.HostEntry) {
 	keep := ""
@@ -42,6 +101,7 @@ func (l *HostList) SelectAlias(alias string) {
 	for i, h := range l.visible {
 		if h.Alias == alias {
 			l.cursor = i
+			l.anchored = true
 			l.clamp()
 			return
 		}
@@ -69,15 +129,67 @@ func (l HostList) Visible() []*config.HostEntry { return l.visible }
 func (l HostList) Filtering() bool              { return l.filtering }
 func (l HostList) HasFilter() bool              { return l.query != "" }
 
+// groupAll reorders the rows the way All renders them: named workspaces in
+// metadata order, then Unassigned.
+func (l *HostList) groupAll() {
+	if l.wsActive != "" {
+		return
+	}
+	var out []*config.HostEntry
+	for _, s := range l.sections() {
+		out = append(out, s.hosts...)
+	}
+	l.visible = out
+}
+
 func (l *HostList) refilter() {
 	q := strings.ToLower(l.query)
 	l.visible = l.visible[:0:0]
 	for _, h := range l.all {
+		if l.wsActive != "" && l.wsOf[h.Alias] != l.wsActive {
+			continue
+		}
 		if q == "" || strings.Contains(strings.ToLower(h.Alias+"\x00"+h.HostName+"\x00"+h.User), q) {
 			l.visible = append(l.visible, h)
 		}
 	}
+	l.groupAll()
 	l.clamp()
+}
+
+// section is one headed group of rows in All.
+type section struct {
+	name  string
+	hosts []*config.HostEntry
+}
+
+// sections groups every host the current filter matches: named workspaces in
+// metadata order, then Unassigned. In a named workspace context there is a
+// single section and no heading, because the context is in the list header.
+func (l HostList) sections() []section {
+	if l.wsActive != "" {
+		return []section{{name: l.wsActive, hosts: l.visible}}
+	}
+	byName := make(map[string][]*config.HostEntry, len(l.wsNames))
+	var unassigned []*config.HostEntry
+	for _, h := range l.visible {
+		w := l.wsOf[h.Alias]
+		if w == "" {
+			unassigned = append(unassigned, h)
+			continue
+		}
+		byName[w] = append(byName[w], h)
+	}
+	var out []section
+	for _, n := range l.wsNames {
+		if hs := byName[n]; len(hs) > 0 {
+			out = append(out, section{name: n, hosts: hs})
+		}
+	}
+	if len(unassigned) > 0 {
+		out = append(out, section{name: "Unassigned", hosts: unassigned})
+	}
+	return out
 }
 
 func (l *HostList) clamp() {
@@ -88,6 +200,36 @@ func (l *HostList) clamp() {
 		l.cursor = 0
 	}
 	l.scrollIntoView()
+}
+
+// reanchor keeps the cursor on alias after the grouping changed. When the
+// host moved within the list, the cursor steps once in the same direction, so
+// a host that just joined a section stays the highlighted row.
+func (l *HostList) reanchor(alias string, oldPos int) {
+	if alias == "" || len(l.visible) == 0 || !l.anchored {
+		l.anchored = false
+		l.clamp()
+		return
+	}
+	newPos := -1
+	for i, h := range l.visible {
+		if h.Alias == alias {
+			newPos = i
+			break
+		}
+	}
+	switch {
+	case newPos < 0:
+		l.clamp()
+	case newPos > oldPos && oldPos < len(l.visible)-1:
+		l.cursor = oldPos + 1
+		l.clamp()
+	case newPos < oldPos && oldPos > 0:
+		l.cursor = oldPos - 1
+		l.clamp()
+	default:
+		l.SelectAlias(alias)
+	}
 }
 
 func (l *HostList) scrollIntoView() {
@@ -212,13 +354,17 @@ func (l *HostList) View(width, height int) string {
 	}
 
 	var header string
+	ctx := ""
+	if l.wsActive != "" {
+		ctx = styles.Badge.Render(ansi.Truncate(l.wsActive, width/2, "…")) + " "
+	}
 	switch {
 	case l.filtering:
-		header = styles.KeyHint.Render("/") + " " + styles.Body.Render(l.query) + styles.Subtle.Render("▏")
+		header = ctx + styles.KeyHint.Render("/") + " " + styles.Body.Render(l.query) + styles.Subtle.Render("▏")
 	case l.query != "":
-		header = styles.KeyHint.Render("/") + " " + styles.Body.Render(l.query) + styles.Subtle.Render("  esc to clear")
+		header = ctx + styles.KeyHint.Render("/") + " " + styles.Body.Render(l.query) + styles.Subtle.Render("  esc to clear")
 	default:
-		header = styles.Subtle.Render("/ to search")
+		header = ctx + styles.Subtle.Render("/ to search")
 	}
 	out := []string{ansi.Truncate(header, width, "…")}
 
@@ -227,20 +373,96 @@ func (l *HostList) View(width, height int) string {
 	case len(l.all) == 0:
 		out = append(out, styles.Subtle.Render(ansi.Truncate("No hosts yet. Press a to add one.", width, "…")))
 	case len(l.visible) == 0:
-		out = append(out, styles.Subtle.Render(ansi.Truncate("No matches.", width, "…")))
+		out = append(out, styles.Subtle.Render(ansi.Truncate(l.emptyLine(), width, "…")))
 	default:
-		end := l.offset + rows
-		if end > len(l.visible) {
-			end = len(l.visible)
-		}
-		for i := l.offset; i < end; i++ {
-			out = append(out, renderRow(l.visible[i], i == l.cursor, width))
-		}
+		out = append(out, l.renderSections(rows, width)...)
 	}
 	for len(out) < height {
 		out = append(out, "")
 	}
 	return strings.Join(out[:height], "\n")
+}
+
+// emptyLine explains an empty result in the current workspace context.
+func (l HostList) emptyLine() string {
+	if l.wsActive != "" {
+		if l.query != "" {
+			return "No matches in " + l.wsActive + "."
+		}
+		return "No hosts in " + l.wsActive + ". Press g on a host to assign it."
+	}
+	return "No matches."
+}
+
+// renderSections renders the grouped rows intersected with the scroll
+// viewport [offset, offset+rows). Headings are non-selectable rows, so only
+// hosts are indexed by the cursor.
+func (l HostList) renderSections(rows, width int) []string {
+	var lines []renderLine
+	position := 0
+	for _, s := range l.sections() {
+		if l.wsActive == "" {
+			lines = append(lines, renderLine{text: renderHeading(s.name, len(s.hosts), width), host: -1})
+		}
+		for _, h := range s.hosts {
+			lines = append(lines, renderLine{text: renderRow(h, position == l.cursor, width), host: position})
+			position++
+		}
+	}
+	if l.offset >= len(lines) {
+		l.offset = 0
+	}
+	if l.cursor < len(l.visible) {
+		l.scrollToVisibleLine(l.cursor, lines)
+	}
+	end := l.offset + rows
+	if end > len(lines) {
+		end = len(lines)
+	}
+	out := make([]string, 0, end-l.offset)
+	for i := l.offset; i < end; i++ {
+		out = append(out, lines[i].text)
+	}
+	return out
+}
+
+// scrollToVisibleLine adjusts the line offset so host cursor sits inside a
+// viewport of the current height. Headings take screen lines but not cursor
+// positions, so the cursor index alone is not a line offset.
+func (l *HostList) scrollToVisibleLine(cursor int, lines []renderLine) {
+	rows := l.height - 1
+	if rows < 1 {
+		rows = 1
+	}
+	lineOf := 0
+	for i, ln := range lines {
+		if ln.host == cursor {
+			lineOf = i
+			break
+		}
+	}
+	if lineOf < l.offset {
+		l.offset = lineOf
+	}
+	if lineOf >= l.offset+rows {
+		l.offset = lineOf - rows + 1
+	}
+	if l.offset < 0 {
+		l.offset = 0
+	}
+}
+
+type renderLine struct {
+	text string
+	host int // index into visible, -1 for a heading
+}
+
+func renderHeading(name string, count, width int) string {
+	label := name
+	if count > 0 {
+		label = fmt.Sprintf("%s (%d)", name, count)
+	}
+	return styles.Badge.Render(ansi.Truncate(label, width-2, "…"))
 }
 
 func renderRow(h *config.HostEntry, active bool, width int) string {
