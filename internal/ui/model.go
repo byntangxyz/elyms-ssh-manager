@@ -184,8 +184,15 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// w leaves a workspace context and returns to All; with no context it
-	// opens the manager below.
+	// opens the manager below. With a search applied it must still open the
+	// manager: the list's own handler would consume it and do nothing.
 	if k.String() == "w" && m.list.Workspace() != "" {
+		if m.list.HasFilter() {
+			m.list, _ = m.list.Update(k)
+			m.list.SetHeight(m.listHeight())
+			m.status = ""
+			return m.openWorkspace(""), nil
+		}
 		m.list, _ = m.list.Update(k)
 		m.list.SetHeight(m.listHeight())
 		return m.setStatus("Showing all hosts", false), nil

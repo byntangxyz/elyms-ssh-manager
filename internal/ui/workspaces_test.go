@@ -115,6 +115,27 @@ func TestWOpensWorkspaceManager(t *testing.T) {
 	}
 }
 
+func TestWOpensManagerWhileSearchIsApplied(t *testing.T) {
+	_, m := newWSEnv(t, cfgSample)
+	m = createAndLeave(m, "Dev")
+	m = key(m, "w")
+	m = key(m, "j")
+	m = key(m, "enter") // switch to Dev
+	m = key(m, "g")     // assign the selected host to Dev
+	m = key(m, "j")
+	m = key(m, "enter")
+	m = key(m, "/")
+	m = typ(m, "db")
+	m = key(m, "enter")
+	if !m.list.HasFilter() || m.list.Workspace() != "Dev" {
+		t.Fatalf("setup: workspace=%q filter=%v", m.list.Workspace(), m.list.HasFilter())
+	}
+	m = key(m, "w")
+	if m.mode != modeWorkspace {
+		t.Fatalf("w with an applied search should open the manager, mode = %v\n%s", m.mode, m.View())
+	}
+}
+
 func TestCreateWorkspacePersistsWithoutSwitching(t *testing.T) {
 	e, m := newWSEnv(t, cfgSample)
 	m = createWS(m, "Dev")
