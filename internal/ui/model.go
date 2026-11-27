@@ -20,6 +20,17 @@ import (
 const (
 	minWidth  = 50
 	minHeight = 16
+
+	// chromeHeight is the vertical space the frame spends outside the
+	// bordered panes: the title, the status line, the hint line, and the two
+	// border rows of the panes themselves.
+	chromeHeight = 5
+
+	// The last row and column are deliberately left unused. Writing a cell in
+	// the bottom-right corner makes conhost (and most other terminals) scroll
+	// or wrap, and a repaint then draws the footer twice on consecutive
+	// lines. Reserving the edge keeps every frame strictly inside the window.
+	reservedEdge = 1
 )
 
 type Options struct {
@@ -604,8 +615,31 @@ func (m Model) openWorkspace(target string) Model {
 	return m
 }
 
+// contentWidth and contentHeight are the columns and rows the frame may use.
+// The terminal's last column and last row are never written: filling them
+// makes conhost scroll the alt screen, and the next repaint then shows the
+// footer on two consecutive lines.
+func (m Model) contentWidth() int {
+	w := m.width - reservedEdge
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+func (m Model) contentHeight() int {
+	h := m.height - reservedEdge
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// listHeight is the number of text rows inside the bordered panes. The frame
+// spends chromeHeight rows outside them (title, status, hint, two borders),
+// and must stay within contentHeight.
 func (m Model) listHeight() int {
-	h := m.height - 6
+	h := m.contentHeight() - chromeHeight
 	if h < 3 {
 		h = 3
 	}
@@ -616,13 +650,14 @@ func (m Model) View() string {
 	if m.width == 0 {
 		return ""
 	}
+	w, h := m.contentWidth(), m.contentHeight()
 	if m.width < minWidth || m.height < minHeight {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			styles.Subtle.Render(fmt.Sprintf("Terminal too small\nneeds %dx%d, have %dx%d", minWidth, minHeight, m.width, m.height)))
+		msg := styles.Subtle.Render(fmt.Sprintf("Terminal too small\nneeds %dx%d, have %dx%d", minWidth, minHeight, m.width, m.height))
+		return clampFrame(w, h, lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, msg))
 	}
 
 	base := m.viewMain()
-	modalW := m.width - 4
+	modalW := w - 4
 	if modalW > 76 {
 		modalW = 76
 	}
@@ -631,15 +666,31 @@ func (m Model) View() string {
 	case modeForm:
 		modal = m.form.View(modalW)
 	case modeKeys:
-		modal = m.keys.View(modalW, m.height-4)
+		modal = m.keys.View(modalW, h-4)
 	case modeConfirm:
 		modal = m.confirm.View(minInt(modalW, 56))
 	case modeWorkspace:
-		modal = m.wsModal.View(minInt(modalW, 64), m.height-4)
+		modal = m.wsModal.View(minInt(modalW, 64), h-4)
 	default:
-		return base
+		return clampFrame(w, h, base)
 	}
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+	return clampFrame(w, h, lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, modal))
+}
+
+// clampFrame enforces the hard bound on what the renderer may draw: at most
+// height rows of at most width cells each, with no trailing newline. Every
+// path out of View goes through it, so a view that overgrows its budget can
+// never push the alt screen into scrolling (which duplicates the last line).
+func clampFrame(width, height int, s string) string {
+	s = strings.TrimRight(s, "\n")
+	lines := strings.Split(s, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i, ln := range lines {
+		lines[i] = ansi.Truncate(ln, width, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func minInt(a, b int) int {
@@ -650,8 +701,9 @@ func minInt(a, b int) int {
 }
 
 func (m Model) viewMain() string {
-	leftW := m.width * 55 / 100
-	rightW := m.width - leftW
+	cw := m.contentWidth()
+	leftW := cw * 55 / 100
+	rightW := cw - leftW
 	listH := m.listHeight()
 
 	list := m.list
@@ -675,7 +727,7 @@ func (m Model) statusLine() string {
 	if m.statusErr {
 		st = styles.ErrorText
 	}
-	return st.Render(ansi.Truncate(m.status, m.width, "…"))
+	return st.Render(ansi.Truncate(m.status, m.contentWidth(), "…"))
 }
 
 // hintLine shows the keys that work right now. It is truncated to the
@@ -698,5 +750,5 @@ func (m Model) hintLine() string {
 			styles.Hint("k", "keys"), styles.Hint("/", "search"), styles.Hint("q", "quit"),
 		}
 	}
-	return ansi.Truncate(strings.Join(parts, "  "), m.width, "…")
+	return ansi.Truncate(strings.Join(parts, "  "), m.contentWidth(), "…")
 }

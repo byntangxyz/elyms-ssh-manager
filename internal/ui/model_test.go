@@ -427,6 +427,47 @@ func TestViewFitsTerminalSize(t *testing.T) {
 	}
 }
 
+// A frame that fills the terminal's last row or column makes conhost scroll
+// or wrap, and the next repaint draws the footer on two consecutive lines.
+// The frame must therefore stay strictly inside the window and end without a
+// trailing newline.
+func TestViewNeverTouchesBottomRightCorner(t *testing.T) {
+	for _, sz := range [][2]int{{120, 30}, {100, 25}, {80, 24}, {60, 15}, {50, 16}, {51, 17}} {
+		_, m := newEnv(t, cfgSample)
+		m = send(m, tea.WindowSizeMsg{Width: sz[0], Height: sz[1]})
+		v := m.View()
+		if strings.HasSuffix(v, "\n") {
+			t.Errorf("%dx%d: view ends with a newline", sz[0], sz[1])
+		}
+		rows := strings.Split(v, "\n")
+		if len(rows) >= sz[1] {
+			t.Errorf("%dx%d: %d rows reach the last row", sz[0], sz[1], len(rows))
+		}
+		for i, r := range rows {
+			if w := lipglossWidth(r); w >= sz[0] {
+				t.Errorf("%dx%d: row %d width %d reaches the last column: %q", sz[0], sz[1], i, w, r)
+			}
+		}
+	}
+}
+
+func TestFooterRendersExactlyOnce(t *testing.T) {
+	for _, sz := range [][2]int{{120, 30}, {80, 24}, {60, 16}, {50, 16}} {
+		_, m := newEnv(t, cfgSample)
+		m = send(m, tea.WindowSizeMsg{Width: sz[0], Height: sz[1]})
+		rows := strings.Split(m.View(), "\n")
+		last := rows[len(rows)-1]
+		if !strings.Contains(last, "enter connect") {
+			t.Errorf("%dx%d: footer is not the last line: %q", sz[0], sz[1], last)
+		}
+		for i, r := range rows[:len(rows)-1] {
+			if strings.Contains(r, "enter connect") && strings.Contains(r, "add") {
+				t.Errorf("%dx%d: footer repeated on row %d: %q", sz[0], sz[1], i, r)
+			}
+		}
+	}
+}
+
 func TestModalsFitTerminalSize(t *testing.T) {
 	for _, open := range []string{"a", "k", "d"} {
 		_, m := newEnv(t, cfgSample)
